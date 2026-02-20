@@ -1,0 +1,22 @@
+[project]
+name = "elote"
+version = "0.1.0"
+description = "ETL package for transforming data and loading to database"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "sqlalchemy",
+    "psycopg[binary]",
+    "tomli",
+    "click",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+elote = "elote.cli:cli"
+
+[tool.uv]
+package = true
