@@ -3,18 +3,11 @@
 from pathlib import Path
 import json
 import pandas as pd
+import geopandas as gpd
 from sqlalchemy import create_engine, table, column, select, func
 from sqlalchemy.exc import ProgrammingError
 import tomli
-from inequalitytools import parse_to_inequality
 from datetime import date
-
-
-### Changes to make
-# 1. check for data on the output table before loading transform
-#   -> this leads to refactor where both transform and load need to know 
-#      table and schema
-# 2. 
 
 
 def get_config():
@@ -26,34 +19,12 @@ def get_db_engine():
     config = get_config()
     return create_engine(
         f"postgresql+psycopg://{config['db']['user']}:{config['db']['password']}"
-        f"@{config['db']['host']}:{config['db']['port']}/{config['db']['name']}",
-        connect_args={"options": f"-csearch_path={config['app']['name']},public"},
+        f"@{config['db']['host']}:{config['db']['port']}/{config['db']['name']}"
     )
 
 
 def _load_field_reference(working_dir: Path, field_reference_file: str) -> dict:
     return json.loads((working_dir / "conf" / field_reference_file).read_text())
-
-
-def _transform_process(frame, field_reference):
-    frame = frame.rename(columns=field_reference["renames"])
-
-    for field in field_reference["suppressed_cols"]:
-        frame[[field, f"{field}_error"]] = (
-            frame[field]
-            .apply(parse_to_inequality)
-            .apply(lambda i: i.unwrap())
-            .to_list()
-        )
-
-    return frame
-
-
-def _apply_padding(frame):
-    for col, padding in [("district_code", 5), ("building_code", 5)]:
-        frame[col] = frame[col].str.zfill(padding)
-
-    return frame
 
 
 def _filter_datasets_on_loaded(datasets, tablename, schema):
@@ -86,20 +57,23 @@ def _filter_datasets_on_loaded(datasets, tablename, schema):
 
 
 def transform_dataset(working_dir: Path, table, schema, custom_transform=None):
-    """Transform source data files into a combined CSV.
+    """Yield one processed DataFrame or GeoDataFrame per source dataset.
 
-    Reads datasets.csv to find source files, applies field renames,
-    processes suppressed columns, and outputs combined_years.csv.
+    Reads datasets.csv to find source files not yet loaded, applies field
+    renames and date columns, and yields each frame for the caller to consume.
 
     Args:
         working_dir: Directory containing conf/ folder with datasets.csv
                      and field_reference_*.json files.
-        custom_transform: Optional function(df) -> df to apply custom
-                          transformations after standard processing.
+        table: Name of the destination database table (used to check what
+               date ranges are already loaded).
+        schema: Database schema for the destination table.
+        custom_transform: Optional function(frame, field_reference) -> frame
+                          to apply custom transformations after standard
+                          processing.
     """
     config = get_config()
 
-    output_dir = working_dir / "output" / "combined_years.csv"
     datasets = pd.read_csv(
         working_dir / "conf" / "datasets.csv",
         parse_dates=["start_date", "end_date"],
@@ -107,64 +81,48 @@ def transform_dataset(working_dir: Path, table, schema, custom_transform=None):
 
     to_load = _filter_datasets_on_loaded(datasets, table, schema)
 
-    mode, header = "w", True
-    for _, year in to_load.iterrows():
-        print(f"Opening {year['source_file']}")
+    for _, file_meta in to_load.iterrows():
+        print(f"Opening {file_meta['source_file']}")
 
-        field_reference = json.loads(
-            (working_dir / "conf" / year["field_reference_file"]).read_text()
-        )
+        field_reference = _load_field_reference(working_dir, file_meta["field_reference_file"])
+
+        suffix = Path(file_meta["source_file"]).suffix
+        if suffix in {".geojson", ".shp", ".gpkg"}:
+            frame = gpd.read_file(Path(config["vault_location"]) / file_meta["source_file"])
+        elif suffix == ".csv":
+            frame = pd.read_csv(Path(config["vault_location"]) / file_meta["source_file"])
+        else:
+            raise ValueError(f"Unsupported file type: {suffix}")
 
         frame = (
-            pd.read_csv(
-                Path(config["vault_location"]) / year["source_file"],
-                dtype=field_reference["in_types"],
-                low_memory=False,
-            )
+            frame
             .rename(columns=field_reference["renames"])
-            .pipe(lambda frame: _transform_process(frame, field_reference))
-            .pipe(_apply_padding)
-            .assign(start_date=year["start_date"], end_date=year["end_date"])
+            .assign(start_date=file_meta["start_date"], end_date=file_meta["end_date"])
         )[field_reference["out_cols"]]
 
         if custom_transform:
-            frame = custom_transform(frame)
+            frame = custom_transform(frame, field_reference)
 
-        frame.to_csv(output_dir, mode=mode, header=header, index=False)
-        mode, header = "a", False
+        yield frame
 
 
-def load_dataset(table_name: str, schema: str, working_dir: Path):
-    """Load transformed data from CSV into database.
+def load_dataset(frames, table_name: str, schema: str):
+    """Load frames from transform_dataset into the database.
+
+    Routes each frame to the appropriate writer: GeoDataFrames go to PostGIS
+    via to_postgis(); plain DataFrames go to PostgreSQL via to_sql().
 
     Args:
-        table_name: Name of the database table.
-        working_dir: Directory containing output/combined_years.csv.
+        frames: Iterable of DataFrames or GeoDataFrames, typically the
+                generator returned by transform_dataset().
+        table_name: Name of the destination database table.
+        schema: Database schema for the destination table.
     """
-
-    datasets = pd.read_csv(
-        working_dir / "conf" / "datasets.csv",
-        parse_dates=["start_date", "end_date"],
-    )
-    
-    # Get the field reference for the last row (the out_types should all match)
-    field_reference_file = datasets.iloc[-1]["field_reference_file"]
-    field_reference = _load_field_reference(working_dir, field_reference_file)
-    
-
     db_engine = get_db_engine()
-    with db_engine.connect() as db:
-        for i, portion in enumerate(
-            pd.read_csv(
-                working_dir / "output" / "combined_years.csv",
-                chunksize=20_000,
-                dtype=field_reference["out_types"],
-                parse_dates=["start_date", "end_date"],
-            ),
-            start=1,
-        ):
-            print(f"Loading chunk {i} into database.")
-
-            portion.to_sql(
-                table_name, db, schema=schema, if_exists="append", index=False
-            )
+    for i, frame in enumerate(frames, start=1):
+        print(f"Loading chunk {i} into database.")
+        if isinstance(frame, gpd.GeoDataFrame):
+            frame.to_postgis(table_name, db_engine, schema=schema, if_exists="append")
+        else:
+            with db_engine.connect() as db:
+                frame.to_sql(table_name, db, schema=schema, if_exists="append", index=False)

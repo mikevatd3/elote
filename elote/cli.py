@@ -37,8 +37,9 @@ from elote import transform_dataset, load_dataset
 
 if __name__ == "__main__":
     WORKING_DIR = Path(__file__).parent
-    transform_dataset(WORKING_DIR)
-    load_dataset("my_table", WORKING_DIR)
+
+    frames = transform_dataset(WORKING_DIR, table="my_table", schema="public")
+    load_dataset(frames, table_name="my_table", schema="public")
 '''
 
 
