@@ -3,9 +3,9 @@
 import click
 from pathlib import Path
 
-DATASETS_CSV_TEMPLATE = """year,start_date,end_date,field_reference_file,source_file
-2010,2009-07-01,2010-06-30,field_reference.json,DATA/path/to/2010/data.csv
-2011,2010-07-01,2011-06-30,field_reference.json,DATA/path/to/2011/data.csv
+DATASETS_CSV_TEMPLATE = """year,start_date,end_date,field_reference_file,source_file,source_type
+2010,2009-07-01,2010-06-30,field_reference.json,DATA/path/to/2010/data.csv,
+2011,2010-07-01,2011-06-30,field_reference.json,DATA/path/to/2011/data.csv,
 """
 
 FIELD_REFERENCE_TEMPLATE = """{
@@ -35,11 +35,23 @@ FIELD_REFERENCE_TEMPLATE = """{
 PROCESS_PY_TEMPLATE = '''from pathlib import Path
 from elote import transform_dataset, load_dataset
 
+TABLE_NAME = None
+SCHEMA = None
+
+"""
+Write a custom transformation function here and provide it to the 
+'transform_dataset' function with kwarg 'custom_transform.' This function 
+should take a dataframe and return a dataframe. It should only operate to 
+clean rows and not do any aggregations. Elote isn't meant for complex 
+aggregations (ELT vs ETL).
+"""
+
+
 if __name__ == "__main__":
     WORKING_DIR = Path(__file__).parent
 
-    frames = transform_dataset(WORKING_DIR, table="my_table", schema="public")
-    load_dataset(frames, table_name="my_table", schema="public")
+    frames = transform_dataset(WORKING_DIR, table=TABLE_NAME, schema=SCHEMA)
+    load_dataset(frames, table_name=TABLE_NAME, schema=SCHEMA)
 '''
 
 
